@@ -51,18 +51,30 @@ The exact real-data snapshot is not included, so the numerical claims cannot
 be reproduced from the sample alone. The fundamentals screener is a separate
 descriptive analysis; the timing result does not validate a selection strategy.
 
-The current complete SQL script is **not a working end-to-end quickstart**:
-query 7 references `Close_Lag_1`, `Close_Lag_2`, and `Close_Lag_3`, which the
-provided schema and feature builder do not supply. Warm-up NULL handling and
-baseline denominators also need correction before interpreting aggregates.
-These limitations are tracked below, rather than hidden behind a green CI badge.
+Query 7 now derives three prior daily returns with `LAG()` using the supplied
+schema. Missing indicators remain unclassified, and the main RSI comparison
+uses the same eligible next-day sample for its baseline. The historical
+percentages predate these corrections and must be recomputed. All nine query
+bodies execute in deterministic SQLite logic tests with date-function adapters;
+MySQL import and execution still require integration verification.
+
+Run the standard-library tests from the checkout with:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+See [numerical and query contracts](docs/analysis-contracts.md) for indicator
+conventions, test scope, and limits on historical claims.
 
 ## Generate features from your own data
 
 Use ISO dates, unique observations, and finite positive split-adjusted closing
 prices. Normalize your export to `Date,Close`; if both `Close` and `Adj Close`
-are present, the current parser chooses `Close`. These input requirements are
-not all enforced by the current implementation.
+are present, the current parser chooses `Close`. The parser rejects malformed
+dates, duplicate days or column names, nonfinite or nonpositive closes, incomplete
+rows, and empty data. Dates are sorted before feature computation. Split
+adjustment and vendor provenance remain the data provider's responsibility.
 
 ```bash
 mkdir -p data outputs

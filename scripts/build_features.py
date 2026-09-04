@@ -31,38 +31,71 @@ about 100 rows in and are identical by 200, but they differ by up to 6 RSI
 points immediately after the warm-up period. Checked against a pandas
 reference on the sample series: Daily_Return and Volatility match exactly.
 """
+
 import argparse
 import csv
 import math
-import sys
+import os
+import tempfile
+from datetime import date, datetime
+from pathlib import Path
 
 
-def read_series(path):
-    """Return [(date_string, close_float)] sorted by date."""
-    with open(path, newline="") as f:
-        rows = list(csv.DictReader(f))
-    if not rows:
-        sys.exit(f"{path} has no data rows")
+def read_series(path: str | Path) -> list[tuple[str, float]]:
+    """Read unique ISO dates and finite positive closes, in ascending order."""
+    with open(path, newline="", encoding="utf-8-sig") as stream:
+        reader = csv.DictReader(stream)
+        headers = reader.fieldnames or []
+        normalized = [name.lower().strip() for name in headers]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError(
+                "CSV column names must be unique ignoring case and whitespace"
+            )
+        cols = dict(zip(normalized, headers))
+        date_col = next(
+            (cols[c] for c in ("date", "datetime", "timestamp") if c in cols), None
+        )
+        close_col = next(
+            (
+                cols[c]
+                for c in ("close", "adj close", "close/last", "closeprice")
+                if c in cols
+            ),
+            None,
+        )
+        if not date_col or not close_col:
+            raise ValueError("CSV needs a date column and a close column")
+        out = []
+        seen = set()
+        for row_number, row in enumerate(reader, start=2):
+            try:
+                if None in row or any(value is None for value in row.values()):
+                    raise ValueError("row does not match the CSV header")
+                raw_date = row[date_col].strip()
+                if len(raw_date) == 10:
+                    day = date.fromisoformat(raw_date).isoformat()
+                elif len(raw_date) > 10 and raw_date[10] in ("T", " "):
+                    day = datetime.fromisoformat(raw_date).date().isoformat()
+                else:
+                    raise ValueError("date must use ISO YYYY-MM-DD or an ISO timestamp")
+                close = float(row[close_col].strip().removeprefix("$").replace(",", ""))
+                if not math.isfinite(close) or close <= 0:
+                    raise ValueError("close must be finite and positive")
+                if day in seen:
+                    raise ValueError("duplicate trading date")
+            except ValueError as exc:
+                raise ValueError(f"CSV row {row_number}: {exc}") from exc
+            seen.add(day)
+            out.append((day, close))
+    if not out:
+        raise ValueError("CSV has no data rows")
+    return sorted(out)
 
-    cols = {k.lower().strip(): k for k in rows[0]}
-    date_col = next((cols[c] for c in ("date", "datetime", "timestamp") if c in cols), None)
-    close_col = next((cols[c] for c in ("close", "adj close", "close/last", "closeprice")
-                      if c in cols), None)
-    if not date_col or not close_col:
-        sys.exit(f"could not find a date and close column in {list(rows[0])}")
 
-    out = []
-    for r in rows:
-        raw = (r[close_col] or "").strip().replace("$", "").replace(",", "")
-        if not raw:
-            continue
-        out.append((r[date_col].strip()[:10], float(raw)))
-    out.sort(key=lambda t: t[0])
-    return out
-
-
-def ema(values, span):
+def ema(values: list[float], span: int) -> list[float | None]:
     """Exponential moving average, None until `span` values are available."""
+    if isinstance(span, bool) or not isinstance(span, int) or span < 1:
+        raise ValueError("span must be a positive integer")
     k = 2 / (span + 1)
     out, acc = [], None
     for i, v in enumerate(values):
@@ -70,16 +103,18 @@ def ema(values, span):
             out.append(None)
             continue
         if acc is None:
-            acc = sum(values[: span]) / span   # seed on the first full window
+            acc = sum(values[:span]) / span  # seed on the first full window
         else:
             acc = v * k + acc * (1 - k)
         out.append(acc)
     return out
 
 
-def wilder_rsi(closes, period=14):
+def wilder_rsi(closes: list[float], period: int = 14) -> list[float | None]:
     """Wilder-smoothed RSI. None for the first `period` rows."""
-    out = [None] * len(closes)
+    if isinstance(period, bool) or not isinstance(period, int) or period < 1:
+        raise ValueError("period must be a positive integer")
+    out: list[float | None] = [None] * len(closes)
     if len(closes) <= period:
         return out
     gains = [max(closes[i] - closes[i - 1], 0.0) for i in range(1, len(closes))]
@@ -99,10 +134,16 @@ def wilder_rsi(closes, period=14):
     return out
 
 
-def rolling_vol(returns, window=20, periods_per_year=252):
-    out = [None] * len(returns)
+def rolling_vol(
+    returns: list[float | None], window: int = 20, periods_per_year: int = 252
+) -> list[float | None]:
+    if isinstance(window, bool) or not isinstance(window, int) or window < 2:
+        raise ValueError("window must be an integer of at least two")
+    if periods_per_year <= 0:
+        raise ValueError("periods_per_year must be positive")
+    out: list[float | None] = [None] * len(returns)
     for i in range(window, len(returns)):
-        w = [r for r in returns[i - window + 1: i + 1] if r is not None]
+        w = [r for r in returns[i - window + 1 : i + 1] if r is not None]
         if len(w) < window:
             continue
         mean = sum(w) / len(w)
@@ -111,14 +152,18 @@ def rolling_vol(returns, window=20, periods_per_year=252):
     return out
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("csv", help="daily OHLCV csv with a date and a close column")
     ap.add_argument("-o", "--out", default="features_engineered.csv")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
-    series = read_series(args.csv)
+    try:
+        series = read_series(args.csv)
+    except (OSError, ValueError) as exc:
+        ap.error(str(exc))
     dates = [d for d, _ in series]
     closes = [c for _, c in series]
 
@@ -128,20 +173,44 @@ def main():
     macd = [None if (a is None or b is None) else a - b for a, b in zip(ema12, ema26)]
     vol = rolling_vol(returns)
 
-    def fmt(x, places):
+    def fmt(x: float | None, places: int) -> str:
+        if x is not None and not math.isfinite(x):
+            raise ValueError(
+                "Computed indicators must be finite; check the price scale"
+            )
         return "" if x is None else f"{x:.{places}f}"
 
-    with open(args.out, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["Date", "RSI", "MACD", "Volatility", "Daily_Return"])
-        for i, d in enumerate(dates):
-            w.writerow([d, fmt(rsi[i], 3), fmt(macd[i], 4),
-                        fmt(vol[i], 6), fmt(returns[i], 6)])
+    target = Path(args.out)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{target.stem}-", suffix=".tmp", dir=target.parent
+    )
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["Date", "RSI", "MACD", "Volatility", "Daily_Return"])
+            for i, d in enumerate(dates):
+                w.writerow(
+                    [
+                        d,
+                        fmt(rsi[i], 3),
+                        fmt(macd[i], 4),
+                        fmt(vol[i], 6),
+                        fmt(returns[i], 6),
+                    ]
+                )
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
     warm = sum(1 for i in range(len(dates)) if rsi[i] is None or macd[i] is None)
-    print(f"wrote {args.out}: {len(dates)} rows, {warm} warm-up rows with NULL indicators")
+    print(
+        f"wrote {args.out}: {len(dates)} rows, {warm} warm-up rows with NULL indicators"
+    )
     print(f"date range {dates[0]} to {dates[-1]}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
