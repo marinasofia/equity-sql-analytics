@@ -5,6 +5,11 @@ development branch; they do not imply a published package or deployed site.
 
 ## Unreleased
 
+### Fixed
+
+- Validate price input, atomically write features, and add deterministic feature and query regression tests.
+- Correct missing lag columns, NULL classification, and matched-sample RSI baselines; mark historical percentages for recomputation.
+
 ### Added
 
 - Contributor, conduct, and private security-reporting policies.

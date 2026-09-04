@@ -33,6 +33,7 @@ SELECT
     RSI,
     LEAD(Daily_Return) OVER (ORDER BY `Date`) AS next_day_return,
     CASE
+        WHEN RSI IS NULL THEN NULL
         WHEN RSI < 30 THEN 'Oversold'
         WHEN RSI < 70 THEN 'Neutral'
         ELSE 'Overbought'
@@ -52,9 +53,10 @@ SELECT
     MACD,
     LEAD(Daily_Return) OVER (ORDER BY `Date`) AS next_day_return,
     CASE
-        WHEN RSI > 70 AND MACD > 0 THEN 'Confirmed Overbought'
+        WHEN RSI IS NULL OR MACD IS NULL THEN NULL
+        WHEN RSI >= 70 AND MACD > 0 THEN 'Confirmed Overbought'
         WHEN RSI < 30 AND MACD < 0 THEN 'Confirmed Oversold'
-        WHEN RSI > 70 OR RSI < 30 THEN 'Unconfirmed Extreme'
+        WHEN RSI >= 70 OR RSI < 30 THEN 'Unconfirmed Extreme'
         ELSE 'Neutral'
     END AS momentum_flag
 FROM features_engineered
@@ -74,6 +76,7 @@ SELECT
     ROUND(100.0 * SUM(CASE WHEN Daily_Return > 0 THEN 1 ELSE 0 END)
           / COUNT(*), 1) AS up_day_pct
 FROM features_engineered
+WHERE Daily_Return IS NOT NULL
 GROUP BY weekday
 ORDER BY up_day_pct DESC;
 
@@ -91,6 +94,7 @@ WITH nvda AS (
 )
 SELECT
     CASE
+        WHEN RSI IS NULL THEN NULL
         WHEN RSI < 30 THEN 'Oversold'
         WHEN RSI < 70 THEN 'Neutral'
         ELSE 'Overbought'
@@ -98,15 +102,17 @@ SELECT
     COUNT(*) AS total_days,
     ROUND(100.0 * SUM(CASE WHEN next_day_return > 0 THEN 1 ELSE 0 END)
           / COUNT(*), 1) AS win_rate_pct,
-    (SELECT ROUND(100.0 * SUM(CASE WHEN Daily_Return > 0 THEN 1 ELSE 0 END)
-            / COUNT(*), 1) FROM features_engineered) AS baseline_pct,
+    (SELECT ROUND(100.0 * SUM(CASE WHEN next_day_return > 0 THEN 1 ELSE 0 END)
+            / COUNT(*), 1) FROM nvda
+     WHERE RSI IS NOT NULL AND next_day_return IS NOT NULL) AS baseline_pct,
     ROUND(
         100.0 * SUM(CASE WHEN next_day_return > 0 THEN 1 ELSE 0 END) / COUNT(*)
-        - (SELECT 100.0 * SUM(CASE WHEN Daily_Return > 0 THEN 1 ELSE 0 END)
-           / COUNT(*) FROM features_engineered),
+        - (SELECT 100.0 * SUM(CASE WHEN next_day_return > 0 THEN 1 ELSE 0 END)
+           / COUNT(*) FROM nvda
+           WHERE RSI IS NOT NULL AND next_day_return IS NOT NULL),
     1) AS edge_vs_baseline
 FROM nvda
-WHERE next_day_return IS NOT NULL
+WHERE next_day_return IS NOT NULL AND RSI IS NOT NULL
 GROUP BY rsi_zone
 HAVING total_days > 50
 ORDER BY win_rate_pct DESC;
@@ -120,6 +126,7 @@ SELECT
     `Date`,
     Volatility,
     CASE
+        WHEN Volatility IS NULL THEN NULL
         WHEN Volatility > (SELECT AVG(Volatility) FROM features_engineered)
         THEN 'High Vol vs History'
         ELSE 'Normal/Low Vol vs History'
@@ -138,6 +145,7 @@ SELECT
     YEAR(f1.`Date`) AS trade_year,
     f1.Volatility,
     CASE
+        WHEN f1.Volatility IS NULL THEN NULL
         WHEN f1.Volatility > (
             SELECT AVG(f2.Volatility)
             FROM features_engineered f2
@@ -155,21 +163,28 @@ ORDER BY f1.`Date`;
    Flag days that came right after 3 down days in a row (the classic
    "buy the dip" setup), and show what happened next.
    ============================================================ */
+WITH history AS (
+    SELECT
+        `Date`,
+        LAG(Daily_Return, 1) OVER (ORDER BY `Date`) AS previous_1,
+        LAG(Daily_Return, 2) OVER (ORDER BY `Date`) AS previous_2,
+        LAG(Daily_Return, 3) OVER (ORDER BY `Date`) AS previous_3,
+        LEAD(Daily_Return) OVER (ORDER BY `Date`) AS next_day_return
+    FROM features_engineered
+)
 SELECT
-    f1.`Date`,
-    LEAD(f1.Daily_Return) OVER (ORDER BY f1.`Date`) AS next_day_return,
+    `Date`,
+    next_day_return,
     CASE
-        WHEN f1.`Date` IN (
-            SELECT f2.`Date`
-            FROM features_engineered f2
-            WHERE f2.Close_Lag_1 < f2.Close_Lag_2
-              AND f2.Close_Lag_2 < f2.Close_Lag_3
-        )
-        THEN 'After 3-Day Losing Streak'
+        WHEN previous_1 IS NULL OR previous_2 IS NULL OR previous_3 IS NULL THEN NULL
+        WHEN `Date` IN (
+            SELECT `Date` FROM history
+            WHERE previous_1 < 0 AND previous_2 < 0 AND previous_3 < 0
+        ) THEN 'After 3-Day Losing Streak'
         ELSE 'Normal Setup'
     END AS setup_flag
-FROM features_engineered f1
-ORDER BY f1.`Date`;
+FROM history
+ORDER BY `Date`;
 
 
 /* ============================================================
@@ -177,15 +192,17 @@ ORDER BY f1.`Date`;
    Sort days by signal strength: strongest oversold setups (RSI and
    MACD both agree) at the top.
    ============================================================ */
-SELECT
-    `Date`,
-    RSI,
-    MACD,
-    Volatility,
-    LEAD(Daily_Return) OVER (ORDER BY `Date`) AS next_day_return
-FROM features_engineered
+WITH ranked_inputs AS (
+    SELECT `Date`, RSI, MACD, Volatility,
+           LEAD(Daily_Return) OVER (ORDER BY `Date`) AS next_day_return
+    FROM features_engineered
+)
+SELECT `Date`, RSI, MACD, Volatility, next_day_return
+FROM ranked_inputs
+WHERE RSI IS NOT NULL AND MACD IS NOT NULL
 ORDER BY
     CASE
+        WHEN RSI IS NULL THEN NULL
         WHEN RSI < 30 AND MACD < 0 THEN 1
         WHEN RSI < 30 THEN 2
         ELSE 3
@@ -209,6 +226,7 @@ WITH nvda AS (
 SELECT
     CASE WHEN YEAR(`Date`) < 2020 THEN 'Pre-2020' ELSE '2020-Present' END AS era,
     CASE
+        WHEN RSI IS NULL THEN NULL
         WHEN RSI < 30 THEN 'Oversold'
         WHEN RSI < 70 THEN 'Neutral'
         ELSE 'Overbought'
@@ -217,7 +235,7 @@ SELECT
     ROUND(100.0 * SUM(CASE WHEN next_day_return > 0 THEN 1 ELSE 0 END)
           / COUNT(*), 1) AS win_rate_pct
 FROM nvda
-WHERE next_day_return IS NOT NULL
+WHERE next_day_return IS NOT NULL AND RSI IS NOT NULL
 GROUP BY era, rsi_zone
 HAVING total_days > 30
 ORDER BY era, win_rate_pct DESC;
@@ -225,6 +243,10 @@ ORDER BY era, win_rate_pct DESC;
 
 /* ============================================================
    WHAT I FOUND
+
+   Historical observations below predate the corrected NULL handling and
+   matched-sample baseline. Recompute them with a pinned input dataset before
+   treating these percentages as reproducible results.
    ============================================================
 
    SUMMARY
