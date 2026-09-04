@@ -1,54 +1,112 @@
 # Equity SQL Analytics
 
-Two MySQL projects that form one thesis: test honestly whether market-timing signals actually work, then, when they don't, screen stocks on fundamentals and risk-adjusted return instead.
+MySQL analyses and a Python feature builder explore NVIDIA technical signals
+and an S&P 500 fundamentals screener.
 
-## Headline finding
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/status-research%20prototype-orange)](docs/maintenance.md)
 
-My first version of the RSI backtest showed overbought NVIDIA days closing up 73.5% of the time, a strong-looking signal. It was wrong. RSI was high *because* the price had already risen that same day, so the query was comparing up days to themselves (look-ahead bias). After fixing the test to compare today's RSI against **tomorrow's** return with `LEAD()`, and benchmarking against NVIDIA's true base rate (52 to 54% of all days close up) instead of 50%, the edge disappeared: win rates landed within a few points of baseline in every RSI zone, in both the pre-2020 and post-2020 eras. RSI alone showed no real predictive edge for NVDA once measured correctly.
+## Quickstart: inspect the committed sample
 
-## Why these two together
-
-`NVIDIA.sql` asks whether entry timing via technical signals works, and after correcting for look-ahead bias it concludes the signals don't beat the base rate. `S&P500.sql` is the consequence: if timing fails, selection should be driven by fundamentals and risk-adjusted return, so it builds a screener on P/E, debt-to-equity, and Sharpe ratio. Together they form one thesis: measure timing claims honestly, then allocate on fundamentals.
-
-## Files
-
-| File | What it is |
-|---|---|
-| `NVIDIA.sql` | RSI/MACD signal backtest over 4,094 NVIDIA trading days (2010 to present). Eight queries plus a regime-split bonus: signal tagging with `CASE`, next-day returns via `LEAD()`, win rates vs. base rate with scalar subqueries, per-year volatility regimes with correlated subqueries, weekday effects, and "buy the dip" losing-streak setups. A full written findings section ("WHAT I FOUND") is at the bottom of the file. |
-| `S&P500.sql` | Investment-analysis schema (`securities` / `price_history` / `fundamentals` with FKs and a unique security+date constraint) plus analytics: daily returns via `LAG()`, 20/50-day moving averages with window frames, annualized volatility (√252), Sharpe ratio (4% risk-free assumption), and a multi-CTE screener filtering on P/E 5 to 25, debt-to-equity < 1.0, and Sharpe > 0.5. |
-| `sector_mapping.csv` | S&P 500 constituents mapped to sectors (492 companies), for joining sector context onto screener output. |
-| `schema.sql` | Creates `features_engineered`, with a `LOAD DATA` template. |
-| `scripts/build_features.py` | Builds `features_engineered` from any daily OHLCV CSV: Wilder RSI, MACD, annualized volatility, daily return. |
-| `sample/features_engineered_sample.csv` | 400 rows of synthetic data so the queries run with no download. Synthetic, so it will not reproduce the findings above. |
-
-## SQL techniques demonstrated
-
-Window functions (`LEAD`, `LAG`, rolling `AVG` with `ROWS BETWEEN`, `PARTITION BY`), multi-stage CTEs, correlated and scalar subqueries, conditional aggregation pivots (`SUM(CASE ...)`), `CASE` in `ORDER BY`, `HAVING` with minimum-sample-size guards, and schema design with integrity constraints.
-
-## Running it
-
-Requires **MySQL 8.0+** (window functions and CTEs).
-
-**To run `NVIDIA.sql` against the real series**, which is what produces the findings above:
+Requires Python 3.12 or newer. This offline example needs no database, account,
+downloaded market data, or third-party Python packages.
 
 ```bash
-mysql -u root mydb < schema.sql
-python3 scripts/build_features.py NVDA.csv -o features_engineered.csv   # any daily OHLCV export
-# then LOAD DATA the result, see the template at the bottom of schema.sql
-mysql -u root mydb < NVIDIA.sql
+git clone https://github.com/marinasofia/equity-sql-analytics.git
+cd equity-sql-analytics
+python3 scripts/build_features.py --help
+python3 - <<'PY'
+import csv
+from pathlib import Path
+with Path("sample/features_engineered_sample.csv").open(newline="") as source:
+    rows = list(csv.DictReader(source))
+print(f"{len(rows)} synthetic observations")
+print("Columns:", ", ".join(rows[0]))
+PY
 ```
 
-**To just see the queries run**, load the committed sample instead of building anything:
+Expect 400 synthetic observations. The sample is for exercising queries; it
+cannot reproduce the historical NVIDIA results described in `NVIDIA.sql`.
+
+## Architecture and features
+
+`daily close CSV -> scripts/build_features.py -> indicator CSV -> MySQL table -> SQL queries`
+
+- `scripts/build_features.py` computes daily returns, Wilder RSI, MACD, and
+  annualized rolling volatility using the Python standard library.
+- `schema.sql` defines the date/indicator table and a `LOAD DATA` template.
+- `NVIDIA.sql` explores CASE expressions, windows, conditional aggregation,
+  subqueries, and next-day outcomes.
+- `S&P500.sql` defines a separate schema and screening queries using prices
+  and fundamentals. It requires your own input data.
+- `sample/features_engineered_sample.csv` contains a committed synthetic series.
+
+## Findings and limitations
+
+The NVIDIA notebook-style SQL narrative documents a methodological correction:
+same-day RSI and returns measured the same price movement. Aligning today's
+indicator with the next day's return using `LEAD()` removes that circularity.
+The historical analysis reports little directional advantage over its baseline.
+The exact real-data snapshot is not included, so the numerical claims cannot
+be reproduced from the sample alone. The fundamentals screener is a separate
+descriptive analysis; the timing result does not validate a selection strategy.
+
+The current complete SQL script is **not a working end-to-end quickstart**:
+query 7 references `Close_Lag_1`, `Close_Lag_2`, and `Close_Lag_3`, which the
+provided schema and feature builder do not supply. Warm-up NULL handling and
+baseline denominators also need correction before interpreting aggregates.
+These limitations are tracked below, rather than hidden behind a green CI badge.
+
+## Generate features from your own data
+
+Use ISO dates, unique observations, and finite positive split-adjusted closing
+prices. Normalize your export to `Date,Close`; if both `Close` and `Adj Close`
+are present, the current parser chooses `Close`. These input requirements are
+not all enforced by the current implementation.
 
 ```bash
-mysql -u root mydb < schema.sql
-# LOAD DATA sample/features_engineered_sample.csv, template in schema.sql
-mysql -u root mydb < NVIDIA.sql
+mkdir -p data outputs
+# Place an authorized Date,Close export at data/prices.csv first.
+python3 scripts/build_features.py data/prices.csv -o outputs/features.csv
 ```
 
-The sample is 400 days of synthetic data, generated by a seeded random walk and passed through the same `build_features.py`. It exists so the SQL is runnable on a fresh clone. It is not NVIDIA data and will not reproduce the win rates written up above.
-- `S&P500.sql` creates its own schema; a commented `LOAD DATA` template shows how to load your own price CSV. Queries run against whatever prices/fundamentals you load.
+No dependency installation is needed. The output columns match `schema.sql`.
+Record the source, adjustment policy, date range, and checksum with each
+analysis. Do not commit a vendor dataset unless its terms permit redistribution.
 
-## Honest limitations
+## MySQL development setup
 
-One stock, one long uptrend, and roughly one bear market can't prove anything about markets in general, only about NVIDIA's own history. The value of the backtest is methodological: measuring signals against next-day outcomes, benchmarking against the true base rate, enforcing minimum sample sizes, and checking that results hold across market regimes.
+Use MySQL 8.0 or newer with a disposable local database and an account allowed
+to create tables in it. The schema drops and recreates `features_engineered`.
+Database credentials belong in your local client configuration or password
+prompt, not in this repository or command history.
+
+```bash
+mysql -u YOUR_LOCAL_USER -p -e 'CREATE DATABASE IF NOT EXISTS equity_demo;'
+mysql -u YOUR_LOCAL_USER -p equity_demo < schema.sql
+```
+
+Replace `YOUR_LOCAL_USER` with your local database user. To import the sample,
+adapt the `LOAD DATA` template in `schema.sql` to an absolute local path. Some
+MySQL installations disable `LOCAL INFILE`; enable it only for an intentional
+local import under your database policy. Read the SQL sections individually
+until the schema/query integration issue is fixed. `S&P500.sql` manages its
+own schema and has separate price/fundamental import requirements.
+
+## Development and roadmap
+
+There is no automated test suite or CI gate yet. Use the checks in
+[CONTRIBUTING.md](CONTRIBUTING.md); they validate syntax and sample structure,
+not SQL correctness or historical results.
+
+TODO: implement the [MySQL reproducibility and validation follow-up](https://github.com/marinasofia/equity-sql-analytics/issues/1).
+It covers query/schema alignment, warm-up behavior, date/price contracts,
+point-in-time joins, dataset provenance, and automated integration tests.
+
+See [maintainer guidance](docs/maintenance.md), [CHANGELOG.md](CHANGELOG.md),
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), and [SECURITY.md](SECURITY.md).
+
+## License
+
+Repository code is [MIT licensed](LICENSE). External market datasets retain
+their own terms. The committed sample is synthetic.
